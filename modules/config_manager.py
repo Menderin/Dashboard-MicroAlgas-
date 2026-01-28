@@ -17,8 +17,18 @@ class ConfigManager:
         
         config = self.db.get_config(self.CONFIG_ID)
         
-        if config is None:
-            config = self._create_initial_config()
+        # Si no existe o no tiene sensores, cargar defaults completos
+        if config is None or not config.get("sensors"):
+            # Cargar TODOS los defaults conocidos (pH, Temp, DO, etc.)
+            SensorRegistry._ensure_loaded()
+            default_sensors = {k: v.to_dict() for k, v in SensorRegistry._defaults.items()}
+            
+            initial = {
+                "_id": self.CONFIG_ID,
+                "sensors": default_sensors
+            }
+            self.db.save_config(self.CONFIG_ID, initial)
+            config = initial
         
         self._cached_config = config
         return config

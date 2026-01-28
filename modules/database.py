@@ -85,6 +85,24 @@ class DatabaseConnection:
         print(f"Dashboard Timeout tras 3 intentos: {str(last_error)}")
         return pd.DataFrame()
 
+    def get_latest_for_single_device(self, device_id: str) -> pd.DataFrame:
+        """Obtiene el último dato de UN solo dispositivo para actualización parcial."""
+        if not self._client: return pd.DataFrame()
+        try:
+            db = self._client[self._db_name]
+            collection = db[self._collection_name]
+            
+            doc = collection.find_one(
+                {"device_id": device_id},
+                sort=[("timestamp", -1)]
+            )
+            
+            if not doc: return pd.DataFrame()
+            return self._process_dashboard_data([doc])
+        except Exception as e:
+            print(f"Error refreshing device {device_id}: {str(e)}")
+            return pd.DataFrame()
+
     # --- MÉTODOS PARA HISTORIAL Y GRÁFICOS ---
     def fetch_data(self, start_date=None, end_date=None, device_ids=None, limit=5000) -> pd.DataFrame:
         if not self._client: return pd.DataFrame()

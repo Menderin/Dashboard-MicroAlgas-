@@ -78,10 +78,27 @@ class SensorRegistry:
         if df.empty:
             return set()
         
-        excluded_columns = {'timestamp', 'device_id', 'location', '_id'}
-        sensor_columns = set(df.columns) - excluded_columns
+        excluded_columns = {'timestamp', 'device_id', 'location', '_id', 'alerts'}
+        potential_sensors = set(df.columns) - excluded_columns
         
-        return sensor_columns
+        discovered = set()
+        
+        # 1. Chequear si alguna columna es un contenedor de sensores (diccionario)
+        # Conocidos: 'sensors', 'sensor_data'
+        container_cols = {'sensors', 'sensor_data'}.intersection(potential_sensors)
+        
+        if container_cols:
+            for col in container_cols:
+                # Inspeccionar el primer registro no nulo
+                first_valid = df[col].dropna().iloc[0] if not df[col].dropna().empty else {}
+                if isinstance(first_valid, dict):
+                    discovered.update(first_valid.keys())
+                    
+        # 2. Las columnas que NO son contenedores, son sensores planos (Legacy)
+        flat_sensors = potential_sensors - container_cols
+        discovered.update(flat_sensors)
+        
+        return discovered
     
     @staticmethod
     def get_default_metadata(sensor_name: str) -> SensorMetadata:

@@ -188,7 +188,7 @@ def show_view():
                         
                         if submitted:
                             if err:
-                                st.error(f"⚠️ No se puede guardar: {err}")
+                                st.error(f"No se puede guardar: {err}")
                             else:
                                 new_data = current_conf.copy()
                                 new_data.update({

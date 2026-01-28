@@ -72,14 +72,44 @@ def show_view():
         numeric_cols = df.select_dtypes(include=['number']).columns
         params = [c for c in numeric_cols if c not in excluded]
 
+        # Leer device_id de la URL (viene del boton de graficas en el dashboard)
+        url_device_id = st.query_params.get("device_id", None)
+        
+        # Determinar seleccion por defecto
+        if url_device_id and url_device_id in devices:
+            default_devices = [url_device_id]
+        else:
+            default_devices = devices[:min(3, len(devices))]
+
         with c_dev:
-            selected_devices = st.multiselect("Dispositivos", devices, default=devices[:min(3, len(devices))])
+            selected_devices = st.multiselect("Dispositivos", devices, default=default_devices)
             
+        # Filtrar parametros disponibles para los dispositivos seleccionados
+        available_params = []
+        if selected_devices:
+            # Subconjunto de datos para dispositivos seleccionados
+            subset_df = df[df['device_id'].isin(selected_devices)]
+            # Identificar columnas que no sean todo NaN o cero
+            for col in params:
+                if col in subset_df.columns and subset_df[col].notna().any():
+                    available_params.append(col)
+        else:
+            available_params = params
+
         with c_param:
+            # Si viene de una tarjeta, mostrar TODOS los parametros disponibles
+            if url_device_id and url_device_id in devices:
+                default_params = available_params
+            else:
+                # Interseccion para asegurar que los defaults existan en available_params
+                temps = [p for p in available_params if "temp" in p.lower()]
+                defaults = temps if temps else available_params[:min(2, len(available_params))]
+                default_params = defaults
+            
             selected_params = st.multiselect(
                 "Parámetros", 
-                params, 
-                default=params[:min(2, len(params))],
+                available_params, 
+                default=default_params,
                 format_func=lambda x: sensor_config.get(x, {}).get('label', x.replace('_', ' ').title())
             )
 

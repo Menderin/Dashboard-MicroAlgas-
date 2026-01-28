@@ -30,7 +30,7 @@ class DeviceInfo:
 # --- CLASE PRINCIPAL ---
 class DeviceManager:
     
-    OFFLINE_TIMEOUT_SECONDS = 30 # Ajustado para sensor que reporta cada 4s
+    OFFLINE_TIMEOUT_SECONDS = 60 # Tiempo de tolerancia para Offline
     
     def __init__(self, global_thresholds: Dict[str, Any], previous_health: Dict[str, HealthStatus] = None, device_specific_thresholds: Dict[str, Dict[str, Any]] = None):
         """
@@ -135,10 +135,13 @@ class DeviceManager:
             
             # Interpretar Configuración de Umbrales
             
-            c_min = float(config.get("critical_min", -9999))
-            c_max = float(config.get("critical_max", 9999))
-            o_min = float(config.get("min_value", -9999)) # Inicio Verde
-            o_max = float(config.get("max_value", 9999)) # Fin Verde
+            # Mapping robusto: Soporta nomenclatura nueva (JSON) y antigua
+            # JSON: min (Rojo), optimal_min (Verde Start), optimal_max (Verde End), max (Rojo)
+            
+            c_min = float(config.get("min", config.get("critical_min", -9999)))
+            c_max = float(config.get("max", config.get("critical_max", 9999)))
+            o_min = float(config.get("optimal_min", config.get("min_value", -9999))) 
+            o_max = float(config.get("optimal_max", config.get("max_value", 9999)))
             
             # Evaluación
             state = HealthStatus.OK
