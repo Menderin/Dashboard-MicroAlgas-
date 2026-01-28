@@ -143,13 +143,14 @@ class DeviceManager:
             
             # Interpretar Configuración de Umbrales
             
-            # Mapping robusto: Soporta nomenclatura nueva (JSON) y antigua
-            # JSON: min (Rojo), optimal_min (Verde Start), optimal_max (Verde End), max (Rojo)
+            # Mapping robusto: Prioriza valores personalizados sobre defaults
+            # Personalizados: min_value, max_value, critical_min, critical_max
+            # Defaults JSON: min, max, optimal_min, optimal_max
             
-            c_min = float(config.get("min", config.get("critical_min", -9999)))
-            c_max = float(config.get("max", config.get("critical_max", 9999)))
-            o_min = float(config.get("optimal_min", config.get("min_value", -9999))) 
-            o_max = float(config.get("optimal_max", config.get("max_value", 9999)))
+            c_min = float(config.get("critical_min", config.get("min", -9999)))
+            c_max = float(config.get("critical_max", config.get("max", 9999)))
+            o_min = float(config.get("min_value", config.get("optimal_min", -9999))) 
+            o_max = float(config.get("max_value", config.get("optimal_max", 9999)))
             
             # Evaluación
             state = HealthStatus.OK
