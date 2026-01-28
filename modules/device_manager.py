@@ -105,14 +105,16 @@ class DeviceManager:
     def _evaluate_connection(self, timestamp: Optional[datetime]) -> ConnectionStatus:
         if timestamp is None: return ConnectionStatus.OFFLINE
         
-        now_local = datetime.now().replace(tzinfo=None)
-        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        ts_clean = timestamp.replace(tzinfo=None)
+        # Zona horaria de Chile (UTC-3)
+        chile_tz = timezone(timedelta(hours=-3))
         
-        diff_local = abs((now_local - ts_clean).total_seconds())
-        diff_utc = abs((now_utc - ts_clean).total_seconds())
+        # Obtener hora actual en Chile (naive para comparar con timestamp normalizado)
+        now_chile = datetime.now(chile_tz).replace(tzinfo=None)
+        ts_clean = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
         
-        if min(diff_local, diff_utc) > self.OFFLINE_TIMEOUT_SECONDS:
+        diff_seconds = abs((now_chile - ts_clean).total_seconds())
+        
+        if diff_seconds > self.OFFLINE_TIMEOUT_SECONDS:
             return ConnectionStatus.OFFLINE
         return ConnectionStatus.ONLINE
 
