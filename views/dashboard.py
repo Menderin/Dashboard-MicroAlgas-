@@ -274,8 +274,19 @@ def render_live_device_card(device_obj: DeviceInfo, thresholds: Dict, config_man
             new_df = db.get_latest_for_single_device(dev_id)
             if not new_df.empty:
                 cfg = ConfigManager(db)
-                th = cfg.get_all_configured_sensors()
-                mgr = DeviceManager(th, {})
+                # 1. Obtener umbrales globales
+                global_thresholds = cfg.get_all_configured_sensors()
+                
+                # 2. Obtener umbrales ESPECIFICOS del dispositivo
+                all_meta = cfg.get_device_metadata()
+                dev_specifics = {k: v.get('thresholds', {}) for k, v in all_meta.items()}
+                
+                # 3. Recuperar estados previos para evitar flasheos
+                prev_states = st.session_state.get('device_health_states', {})
+                
+                # 4. Crear DeviceManager con TODA la configuracion
+                mgr = DeviceManager(global_thresholds, prev_states, dev_specifics)
+                
                 new_infos = mgr.get_all_devices_info(new_df)
                 if new_infos:
                     st.session_state[state_key] = new_infos[0]

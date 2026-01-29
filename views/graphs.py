@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 from modules.database import DatabaseConnection
 from modules.config_manager import ConfigManager
@@ -136,6 +137,7 @@ def cargar_historial_completo() -> pd.DataFrame:
     - Sin límite de datos
     """
     try:
+        start_time_total = time.time()
         db = DatabaseConnection()
         
         if not db.sources:
@@ -149,6 +151,14 @@ def cargar_historial_completo() -> pd.DataFrame:
         cut_off_time = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-3))).replace(tzinfo=None)
         print(f"[graphs.py] Tiempo de corte de sincronización: {cut_off_time}")
         
+        # Calcular fecha de inicio para la consulta (1 semana atrás + margen de 1 hora)
+        # Esto reduce drásticamente la cantidad de datos transferidos
+        start_date = cut_off_time - timedelta(weeks=1, hours=1)
+        # Crear versiones del timestamp para diferentes formatos de BD
+        start_date_iso = start_date.isoformat()
+        
+        print(f"[graphs.py] Limitando consulta a datos desde: {start_date}")
+
         def load_source_data(source):
             """Función auxiliar para cargar datos de una fuente individual."""
             try:
@@ -161,13 +171,22 @@ def cargar_historial_completo() -> pd.DataFrame:
                     'sensors': 1, 'datos': 1, 'location': 1, 'metadata': 1
                 }
                 
+                # Construir Query con filtro de fecha (Soporta Date objects y ISO Strings)
+                # Usamos $or para cubrir ambos casos sin saber el esquema a priori
+                query = {
+                    "$or": [
+                        {"timestamp": {"$gte": start_date}},        # Para objetos Date (Victor)
+                        {"timestamp": {"$gte": start_date_iso}}     # Para strings ISO (Martin)
+                    ]
+                }
+                
                 # Cargar documentos (intenta sort, fallback a sin sort)
                 try:
-                    cursor = collection.find({}, projection).sort('timestamp', -1)
+                    cursor = collection.find(query, projection).sort('timestamp', -1)
                     raw_documents = list(cursor)
                 except Exception as sort_error:
                     print(f"[graphs.py] Sort falló para {source['name']}: {sort_error}")
-                    cursor = collection.find({}, projection)
+                    cursor = collection.find(query, projection)
                     raw_documents = list(cursor)
                 
                 print(f"[graphs.py] Fuente '{source['name']}': {len(raw_documents)} documentos cargados")
@@ -228,6 +247,9 @@ def cargar_historial_completo() -> pd.DataFrame:
         # Ordenar por timestamp ascendente
         if 'timestamp' in df.columns and not df.empty:
             df = df.sort_values('timestamp', ascending=True)
+        
+        elapsed_time = time.time() - start_time_total
+        print(f"[graphs.py] Tiempo total de carga y procesamiento: {elapsed_time:.2f} segundos")
         
         # DEBUG: Mostrar t_max por dispositivo inmediatamente después de cargar
         if 'timestamp' in df.columns and 'device_id' in df.columns and not df.empty:
@@ -370,7 +392,6 @@ def show_view():
                 "24 Horas": timedelta(hours=24),
                 "3 Días": timedelta(days=3),
                 "1 Semana": timedelta(weeks=1),
-                "Todo el historial": None,
             }
             time_keys = list(time_options.keys())
             
@@ -488,8 +509,8 @@ def show_view():
         return
 
     # --- FILTRAR DATOS EN MEMORIA (RÁPIDO) ---
-    # DEBUG activado para diagnosticar problemas de filtrado
-    filtered_df = filtrar_dataframe(df_completo, selected_devices, delta, debug=True)
+    # DEBUG desactivado para producción
+    filtered_df = filtrar_dataframe(df_completo, selected_devices, delta, debug=False)
     
     if filtered_df.empty:
         st.warning("No hay datos para la selección actual.")
