@@ -199,7 +199,7 @@ def refresh_dashboard_data(all_devices, thresholds, config_manager):
     
     # Mostrar indicador de última actualización
     refresh_time = datetime.now().strftime("%H:%M:%S")
-    st.caption(f"🔄 Última actualización: {refresh_time} • Auto-actualizando cada 30 segundos")
+    st.caption(f" Última actualización: {refresh_time} • Auto-actualizando cada 30 segundos")
     
     # Renderizar KPIs
     device_manager_for_metrics = DeviceManager(thresholds, {})
