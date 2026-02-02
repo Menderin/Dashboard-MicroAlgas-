@@ -161,10 +161,88 @@ def show_view():
         st.error(f"Error fetching devices: {str(e)}")
         return
     
+    # Solo necesitamos pasar config_manager, el fragment cargará los datos
     render_dashboard_content(all_devices, thresholds, config_manager)
 
 
+@st.fragment(run_every=30)
+def refresh_dashboard_data(all_devices, thresholds, config_manager):
+    """Fragment que se auto-refresca cada 30 segundos"""
+    from datetime import datetime
+    
+    # Recargar datos frescos
+    db = DatabaseConnection()
+    df = db.get_latest_by_device()
+    
+    if df is not None and not df.empty:
+        prev_states = st.session_state.get('device_health_states', {})
+        
+        try:
+            detected = SensorRegistry.discover_sensors_from_dataframe(df)
+            config_manager.sync_with_detected_sensors(detected)
+            global_thresholds = config_manager.get_all_configured_sensors()
+            
+            all_meta = config_manager.get_device_metadata()
+            dev_specifics = {k: v.get('thresholds', {}) for k, v in all_meta.items()}
+            device_manager = DeviceManager(global_thresholds, prev_states, dev_specifics)
+        except:
+            device_manager = DeviceManager(thresholds, prev_states)
+        
+        # Actualizar lista de dispositivos con datos frescos
+        all_devices = device_manager.get_all_devices_info(df)
+        st.session_state['device_health_states'] = device_manager.get_health_states()
+        
+        # IMPORTANTE: Actualizar el cache de cada dispositivo para que las tarjetas muestren datos frescos
+        for device in all_devices:
+            state_key = f"live_data_{device.device_id}"
+            st.session_state[state_key] = device
+    
+    # Mostrar indicador de última actualización
+    refresh_time = datetime.now().strftime("%H:%M:%S")
+    st.caption(f"🔄 Última actualización: {refresh_time} • Auto-actualizando cada 30 segundos")
+    
+    # Renderizar KPIs
+    device_manager_for_metrics = DeviceManager(thresholds, {})
+    render_summary_metrics(device_manager_for_metrics, all_devices)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Aplicar filtros desde session_state
+    show_offline = st.session_state.get('dashboard_show_offline', False)
+    filtered_devices = apply_session_state_filters(all_devices, config_manager)
+    
+    # Si no mostrar offline, filtrar
+    if not show_offline:
+        filtered_devices = [d for d in filtered_devices if d.connection != ConnectionStatus.OFFLINE]
+    
+    # Renderizar Grid
+    if not all_devices and not filtered_devices:
+        render_empty_state()
+        return
+    
+    if not filtered_devices and all_devices:
+        st.info("No se encontraron dispositivos con los filtros actuales.")
+        return
+    
+    render_device_grid(filtered_devices, thresholds, config_manager, show_offline)
+
+
 def render_dashboard_content(all_devices, thresholds, config_manager):
+    """Renderiza el contenido del dashboard con auto-refresh"""
+    
+    # --- Filtros (fuera del fragment para preservar interacción) ---
+    with st.container(border=True):
+        st.markdown("<div style='margin-bottom: 10px; font-weight: 600; color: #64748b; font-size: 0.9rem; display: flex; align-items: center; gap: 6px;'><svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/></svg> Filtros y Búsqueda</div>", unsafe_allow_html=True)
+        render_filters(all_devices, config_manager)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # --- Fragment con auto-refresh ---
+    refresh_dashboard_data(all_devices, thresholds, config_manager)
+
+
+# Old render_dashboard_content - DEPRECATED
+def render_dashboard_content_old(all_devices, thresholds, config_manager):
     """Renderiza el contenido del dashboard (KPIs, filtros, grid)"""
     # --- KPI Cards ---
     device_manager = DeviceManager(thresholds, {})
@@ -175,7 +253,7 @@ def render_dashboard_content(all_devices, thresholds, config_manager):
     # --- Filters ---
     with st.container(border=True):
         st.markdown("<div style='margin-bottom: 10px; font-weight: 600; color: #64748b; font-size: 0.9rem; display: flex; align-items: center; gap: 6px;'><svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/></svg> Filtros y Búsqueda</div>", unsafe_allow_html=True)
-        filtered_devices = render_filters(all_devices, config_manager)
+        filtered_devices, show_offline = render_filters(all_devices, config_manager)
     
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -188,7 +266,7 @@ def render_dashboard_content(all_devices, thresholds, config_manager):
         st.info("No se encontraron dispositivos con los filtros actuales.")
         return
         
-    render_device_grid(filtered_devices, thresholds, config_manager)
+    render_device_grid(filtered_devices, thresholds, config_manager, show_offline)
 
 
 # Import fragment with fallback
@@ -294,18 +372,24 @@ def render_live_device_card(device_obj: DeviceInfo, thresholds: Dict, config_man
             st.toast(f"Error: {e}")
 
 
-def render_device_grid(devices, thresholds, config_manager=None):
+def render_device_grid(devices, thresholds, config_manager=None, show_offline=False):
+    
+    # Filtrar dispositivos offline si show_offline es False
+    if show_offline:
+        display_devices = devices
+    else:
+        display_devices = [d for d in devices if d.connection != ConnectionStatus.OFFLINE]
     
     with st.container():
         PER_PAGE = 9
-        total_pages = max(1, (len(devices) + PER_PAGE - 1) // PER_PAGE)
+        total_pages = max(1, (len(display_devices) + PER_PAGE - 1) // PER_PAGE)
         
         if st.session_state.dashboard_page >= total_pages: st.session_state.dashboard_page = 0
         current_page = st.session_state.dashboard_page
         
         start = current_page * PER_PAGE
         end = start + PER_PAGE
-        page_items = devices[start:end]
+        page_items = display_devices[start:end]
         
         cols = st.columns(3)
         for i, device in enumerate(page_items):
@@ -362,7 +446,75 @@ def build_kpi_html(label, value, bg_color, text_color):
         </div>
     """
 
+def apply_session_state_filters(devices, config_manager=None):
+    """Aplica los filtros almacenados en session_state a la lista de dispositivos"""
+    alias_map = {}
+    custom_loc_map = {}
+    if config_manager:
+        meta = config_manager.get_device_metadata()
+        for dev_id, info in meta.items():
+            alias_map[dev_id] = info.get("alias", "")
+            custom_loc_map[dev_id] = info.get("location", "")
+
+    canonical_locations = set()
+    device_canon_map = {}
+    for d in devices:
+        eff_loc = custom_loc_map.get(d.device_id) or d.location
+        if eff_loc:
+             canonical_locations.add(eff_loc)
+             device_canon_map[d.device_id] = eff_loc
+    
+    filtered = devices
+    
+    # Aplicar filtro de tipo
+    filter_type = st.session_state.get('dashboard_filter_type', '-- Selección Rápida --')
+    dynamic_filter = st.session_state.get('dashboard_dynamic_filter', [])
+    
+    if filter_type == "Por Estado" and dynamic_filter:
+        res = []
+        for d in filtered:
+            s_str = "Offline" if d.connection == ConnectionStatus.OFFLINE else (
+                "Crítico" if d.health == HealthStatus.CRITICAL else (
+                    "Alerta" if d.health == HealthStatus.WARNING else "Normal"))
+            if s_str in dynamic_filter:
+                res.append(d)
+        filtered = res
+    elif filter_type == "Por Ubicación" and dynamic_filter:
+        filtered = [d for d in filtered if device_canon_map.get(d.device_id) in dynamic_filter]
+    elif filter_type == "Por Alias/ID" and dynamic_filter:
+        filtered = [d for d in filtered if alias_map.get(d.device_id, d.device_id) in dynamic_filter]
+    
+    # Aplicar búsqueda
+    search = st.session_state.get('dashboard_search', '').lower()
+    if search:
+        results = []
+        for d in filtered:
+            if any(search in x.lower() for x in [d.device_id, d.location, 
+                   alias_map.get(d.device_id, ""), custom_loc_map.get(d.device_id, "")]):
+                results.append(d)
+        filtered = results
+    
+    # Ordenar
+    filtered.sort(key=lambda x: alias_map.get(x.device_id, x.device_id.lower()))
+    
+    return filtered
+
+def initialize_filter_session_state():
+    """Inicializa el session_state de los filtros si no existe"""
+    if 'dashboard_search' not in st.session_state:
+        st.session_state.dashboard_search = ""
+    if 'dashboard_filter_type' not in st.session_state:
+        st.session_state.dashboard_filter_type = "-- Selección Rápida --"
+    if 'dashboard_dynamic_filter' not in st.session_state:
+        st.session_state.dashboard_dynamic_filter = []
+    if 'dashboard_show_offline' not in st.session_state:
+        st.session_state.dashboard_show_offline = False
+
 def render_filters(devices, config_manager=None):
+    """Renderiza los controles de filtrado y los almacena en session_state"""
+    # Inicializar session state
+    initialize_filter_session_state()
+    
     alias_map = {}
     custom_loc_map = {}
     if config_manager:
@@ -383,38 +535,59 @@ def render_filters(devices, config_manager=None):
     all_aliases = sorted([alias_map.get(d.device_id, d.device_id) for d in devices])
     
     with st.container(border=True):
-        c1, c2, c3 = st.columns([1.5, 1, 1.5])
-        with c1: search = st.text_input("Búsqueda Rápida", placeholder="Escribe para buscar...", label_visibility="collapsed")
-        with c2: filter_type = st.selectbox("Criterio de Filtrado", ["-- Selección Rápida --", "Por Estado", "Por Ubicación", "Por Alias/ID"], label_visibility="collapsed")
+        c1, c2, c3, c4 = st.columns([1.5, 1, 1.5, 0.8])
         
-        filtered = devices
+        with c1:
+            st.text_input(
+                "Búsqueda Rápida", 
+                placeholder="Escribe para buscar...", 
+                label_visibility="collapsed",
+                key="dashboard_search"
+            )
+        
+        with c2:
+            st.selectbox(
+                "Criterio de Filtrado", 
+                ["-- Selección Rápida --", "Por Estado", "Por Ubicación", "Por Alias/ID"], 
+                label_visibility="collapsed",
+                key="dashboard_filter_type"
+            )
+        
+        with c4:
+            st.checkbox(
+                "Mostrar Offline", 
+                value=False, 
+                help="Mostrar dispositivos offline en el grid",
+                key="dashboard_show_offline"
+            )
+        
+        # Dynamic filter basado en el tipo seleccionado
         with c3:
-            dynamic_filter = []
+            filter_type = st.session_state.dashboard_filter_type
             if filter_type == "Por Estado":
-                dynamic_filter = st.multiselect("Estado", ["Normal", "Alerta", "Crítico", "Offline"], label_visibility="collapsed")
-                if dynamic_filter:
-                    res = []
-                    for d in filtered:
-                        s_str = "Offline" if d.connection == ConnectionStatus.OFFLINE else ("Crítico" if d.health == HealthStatus.CRITICAL else ("Alerta" if d.health == HealthStatus.WARNING else "Normal"))
-                        if s_str in dynamic_filter: res.append(d)
-                    filtered = res
+                st.multiselect(
+                    "Estado", 
+                    ["Normal", "Alerta", "Crítico", "Offline"], 
+                    label_visibility="collapsed",
+                    key="dashboard_dynamic_filter"
+                )
             elif filter_type == "Por Ubicación":
-                dynamic_filter = st.multiselect("Ubicación", all_locations, label_visibility="collapsed")
-                if dynamic_filter: filtered = [d for d in filtered if device_canon_map.get(d.device_id) in dynamic_filter]
+                st.multiselect(
+                    "Ubicación", 
+                    all_locations, 
+                    label_visibility="collapsed",
+                    key="dashboard_dynamic_filter"
+                )
             elif filter_type == "Por Alias/ID":
-                dynamic_filter = st.multiselect("ID o Alias", all_aliases, label_visibility="collapsed")
-                if dynamic_filter: filtered = [d for d in filtered if alias_map.get(d.device_id, d.device_id) in dynamic_filter]
-
-        if search:
-            s = search.lower()
-            results = []
-            for d in filtered:
-                if any(s in x.lower() for x in [d.device_id, d.location, alias_map.get(d.device_id, ""), custom_loc_map.get(d.device_id, "")]):
-                    results.append(d)
-            filtered = results
-
-        filtered.sort(key=lambda x: alias_map.get(x.device_id, x.device_id.lower()))
-        return filtered
+                st.multiselect(
+                    "ID o Alias", 
+                    all_aliases, 
+                    label_visibility="collapsed",
+                    key="dashboard_dynamic_filter"
+                )
+            else:
+                # Reset dynamic filter si no hay tipo seleccionado
+                st.session_state.dashboard_dynamic_filter = []
 
 def build_card_html(device: DeviceInfo, thresholds: Dict, config_manager: ConfigManager = None, sensor_page: int = 0, total_pages: int = 1) -> str:
     """Genera el HTML de una tarjeta de dispositivo con altura fija."""

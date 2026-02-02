@@ -397,12 +397,48 @@ def show_view():
             """Verifica si el dispositivo tiene un alias configurado."""
             return get_device_alias(dev_id) is not None
         
+        def is_device_online(dev_id):
+            """Verifica si el dispositivo está online basándose en la última conexión."""
+            try:
+                from datetime import timezone, timedelta
+                
+                # Obtener metadatos completos de todos los dispositivos
+                all_devices_meta = db.get_all_devices_metadata()
+                device_meta = all_devices_meta.get(dev_id, {})
+                
+                # Obtener timestamp de última conexión
+                conexion = device_meta.get('conexion', {})
+                ultima = conexion.get('ultima')
+                
+                if ultima is None:
+                    return False
+                
+                # Obtener hora actual en UTC (el timestamp de BD está en UTC)
+                now_utc = datetime.now(timezone.utc)
+                
+                # Asegurar que ultima tenga timezone (debería ser UTC)
+                if ultima.tzinfo is None:
+                    ultima = ultima.replace(tzinfo=timezone.utc)
+                
+                # Calcular diferencia en segundos
+                diff_seconds = abs((now_utc - ultima).total_seconds())
+                
+                # Dispositivo está online si último dato fue hace menos de 60 segundos
+                is_online = diff_seconds <= 60
+                
+                return is_online
+            except Exception as e:
+                return False
+        
         # Filtrar: solo dispositivos con alias configurado (excluir desconocidos)
         devices = [dev_id for dev_id in all_devices if has_configured_alias(dev_id)]
         
         # Si no hay dispositivos con alias, mostrar todos (fallback)
         if not devices:
             devices = all_devices
+        
+        # Identificar dispositivos online para selección por defecto
+        online_devices = [dev_id for dev_id in devices if is_device_online(dev_id)]
         
         # Crear mapeo ID -> Alias para mostrar
         device_display_map = {dev_id: get_device_alias(dev_id) or dev_id for dev_id in devices}
@@ -415,7 +451,7 @@ def show_view():
         # Usamos 'default' para la primera carga, sin key (evita conflictos)
         # =====================================================================
         
-        # Calcular default inicial
+        # Calcular default inicial - TODOS LOS DISPOSITIVOS ONLINE
         if url_device_id and url_device_id in devices:
             initial_default = [url_device_id]
         else:
@@ -423,9 +459,10 @@ def show_view():
             if 'graphs_prev_devices' in st.session_state:
                 prev = st.session_state.graphs_prev_devices
                 valid_prev = [d for d in prev if d in devices]
-                initial_default = valid_prev if valid_prev else devices[:min(2, len(devices))]
+                initial_default = valid_prev if valid_prev else online_devices
             else:
-                initial_default = devices[:min(2, len(devices))]
+                # Por defecto: seleccionar TODOS los dispositivos ONLINE
+                initial_default = online_devices if online_devices else []
         
         with c_dev:
             selected_devices = st.multiselect(
