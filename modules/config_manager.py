@@ -136,27 +136,26 @@ class ConfigManager:
 
     def get_device_metadata(self) -> Dict[str, Dict[str, str]]:
         """Recupera los metadatos de dispositivos (alias, ubicación)."""
-        config = self.db.get_config(self.DEVICES_CONFIG_ID)
-        if not config:
-            return {}
-        return config.get("devices", {})
+        all_devices = self.db.get_all_devices_metadata()
+        
+        # Mapear nombre->alias y ubicacion->location para compatibilidad con código existente
+        result = {}
+        for dev_id, dev_data in all_devices.items():
+            result[dev_id] = {
+                "alias": dev_data.get("nombre", dev_id),  # nombre es el campo real
+                "location": dev_data.get("ubicacion", "Desconocido")  # ubicacion es el campo real
+            }
+        return result
 
     def update_device_metadata(self, device_id: str, alias: str, location: str) -> bool:
-        """Actualiza el alias y ubicación de un dispositivo específico."""
-        config = self.db.get_config(self.DEVICES_CONFIG_ID)
-        
-        if not config:
-            config = {"_id": self.DEVICES_CONFIG_ID, "devices": {}}
-        
-        if "devices" not in config:
-            config["devices"] = {}
-            
-        config["devices"][device_id] = {
-            "alias": alias,
-            "location": location
+        """Actualiza el nombre y ubicación de un dispositivo específico."""
+        # Usar $set para actualizar solo nombre y ubicacion, preservando todo lo demás
+        update_data = {
+            "nombre": alias,  # El parámetro se llama 'alias' por compatibilidad, pero guardamos en 'nombre'
+            "ubicacion": location  # Guardamos en 'ubicacion' (español)
         }
         
-        return self.db.save_config(self.DEVICES_CONFIG_ID, config)
+        return self.db.update_device_fields(device_id, update_data)
 
     def get_device_info(self, device_id: str) -> Dict[str, str]:
         """Obtiene la info enriquecida de un dispositivo (o devuelve defaults)."""
@@ -165,20 +164,16 @@ class ConfigManager:
         
     def get_device_thresholds(self, device_id: str) -> Dict[str, Any]:
         """Obtiene umbrales específicos de un dispositivo (si existen)."""
-        meta = self.get_device_metadata()
-        dev_conf = meta.get(device_id, {})
-        return dev_conf.get("thresholds", {})
+        dev_data = self.db.get_device_metadata(device_id)
+        if not dev_data:
+            return {}
+        return dev_data.get("umbrales", {})  # Usar 'umbrales' en español
 
     def update_device_threshold(self, device_id: str, sensor_name: str, threshold_data: Dict[str, Any]) -> bool:
         """Guarda umbrales específicos para un sensor de un dispositivo."""
-        config = self.db.get_config(self.DEVICES_CONFIG_ID)
-        if not config:
-            config = {"_id": self.DEVICES_CONFIG_ID, "devices": {}}
-            
-        if "devices" not in config: config["devices"] = {}
-        if device_id not in config["devices"]: config["devices"][device_id] = {}
-        if "thresholds" not in config["devices"][device_id]: config["devices"][device_id]["thresholds"] = {}
+        # Usar $set con dot notation para actualizar solo el threshold específico
+        update_data = {
+            f"umbrales.{sensor_name}": threshold_data
+        }
         
-        config["devices"][device_id]["thresholds"][sensor_name] = threshold_data
-        
-        return self.db.save_config(self.DEVICES_CONFIG_ID, config)
+        return self.db.update_device_fields(device_id, update_data)

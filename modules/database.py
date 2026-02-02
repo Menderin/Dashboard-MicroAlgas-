@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 load_dotenv()
 
 # --- PATRÓN SINGLETON (CONEXIÓN ROBUSTA) ---
-# Ahora soporta cachear multiples clientes por URI
 @st.cache_resource(ttl=3600, show_spinner=False)
 def get_mongo_client(uri: str) -> Optional[MongoClient]:
     if not uri: return None
@@ -30,44 +29,41 @@ def get_mongo_client(uri: str) -> Optional[MongoClient]:
         client.admin.command('ping')
         return client
     except Exception as e:
-        st.error(f"Error conexión MongoDB ({uri[:20]}...): {str(e)}")
+        st.error(f"Error conexión MongoDB: {str(e)}")
         return None
 
 class DatabaseConnection:
     CONFIG_COLLECTION = "system_config"
 
     def __init__(self):
-        self.sources = []
+        # 1. Configuración de Fuente Única
+        self.uri = os.getenv("MONGO_URI")
+        self.db_name = os.getenv("MONGO_DB")
+        self.coll_name = os.getenv("MONGO_COLLECTION", "sensors_data")
+        self.client = get_mongo_client(self.uri)
         
-        # 1. Fuente Principal
-        uri1 = os.getenv("MONGO_URI")
-        db1 = os.getenv("MONGO_DB")
-        coll1 = os.getenv("MONGO_COLLECTION")
-        
-        if uri1 and db1 and coll1:
-            client1 = get_mongo_client(uri1)
-            if client1:
-                self.sources.append({
-                    "name": "Primary",
-                    "client": client1,
-                    "db": db1,
-                    "coll": coll1
-                })
-        
-        # 2. Fuente Secundaria (Partner)
-        uri2 = os.getenv("MONGO_URI_2")
-        db2 = os.getenv("MONGO_DB_2")
-        coll2 = os.getenv("MONGO_COLLECTION_2")
-        
-        if uri2 and db2 and coll2:
-            client2 = get_mongo_client(uri2)
-            if client2:
-                self.sources.append({
-                    "name": "Secondary",
-                    "client": client2,
-                    "db": db2,
-                    "coll": coll2
-                })
+        if not self.client:
+            print("Error: No se pudo establecer conexión con MongoDB")
+            
+    @property
+    def db(self):
+        if self.client:
+            return self.client[self.db_name]
+        return None
+
+    @property
+    def collection(self):
+        if self.db is not None:
+            return self.db[self.coll_name]
+        return None
+
+    @property
+    def devices_collection(self):
+        """Colección dedicada para metadatos de dispositivos."""
+        if self.db is not None:
+            devices_coll = os.getenv("MONGO_COLLECTION_DISPOSITIVOS", "devices_data")
+            return self.db[devices_coll]
+        return None
 
     # --- MÉTODOS ADAPTER (Normalización) ---
     def _normalize_document(self, doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -163,148 +159,125 @@ class DatabaseConnection:
             "_source_id": oid 
         }
 
-    # --- MÉTODO PARA DASHBOARD (Multi-DB) ---
-    def get_latest_by_device(self, retries: int = 2) -> pd.DataFrame:
-        if not self.sources: return pd.DataFrame()
+    # --- MÉTODO PARA DASHBOARD (Single-DB Optimized) ---
+    def get_latest_by_device(self) -> pd.DataFrame:
+        if self.collection is None: return pd.DataFrame()
         
-        all_docs = []
-        seen_devices = set()
-        
-        # Iterar sobre todas las fuentes configuradas
-        for source in self.sources:
-            try:
-                db = source["client"][source["db"]]
-                collection = db[source["coll"]]
-                
-                cursor = collection.find({}).sort("timestamp", -1).limit(1000) # Limitamos por fuente
-                documents = list(cursor)
-                
-                for raw_doc in documents:
-                    norm_doc = self._normalize_document(raw_doc)
-                    dev_id = norm_doc["device_id"]
+        try:
+            # AGREGACIÓN para obtener el documento más reciente de CADA dispositivo
+            # Esto soluciona el problema de dispositivos inactivos que quedan fuera del limit(1000) simple
+            pipeline = [
+                {"$sort": {"timestamp": -1}},
+                {"$group": {
+                    "_id": {
+                        "$ifNull": ["$device_id", "$dispositivo_id"] # Manejar ambos nombres de campo ID
+                    },
+                    "latest_doc": {"$first": "$$ROOT"}
+                }},
+                {"$replaceRoot": {"newRoot": "$latest_doc"}}
+            ]
+            
+            documents = list(self.collection.aggregate(pipeline))
+            
+            all_docs = []
+            for raw_doc in documents:
+                norm_doc = self._normalize_document(raw_doc)
+                if norm_doc["device_id"] and norm_doc["device_id"] != "unknown":
+                    all_docs.append(norm_doc)
                     
-                    # Prioridad: el primero que llega gana (usualmente el de la fuente principal si iteration order es fijo)
-                    # O podrias querer ver duplicados si tienen mismo ID pero diferente fuente? 
-                    # Asumiremos IDs unicos globales o que queremos unificar
-                    if dev_id and dev_id != "unknown" and dev_id not in seen_devices:
-                        seen_devices.add(dev_id)
-                        all_docs.append(norm_doc)
+            return self._rows_to_dataframe(all_docs)
                         
-            except Exception as e:
-                print(f"Error fetching from source {source['name']}: {str(e)}")
-                continue
-
-        return self._rows_to_dataframe(all_docs)
+        except Exception as e:
+            print(f"Error fetching latest devices: {str(e)}")
+            return pd.DataFrame()
 
     def get_latest_for_single_device(self, device_id: str) -> pd.DataFrame:
-        """Busca el dispositivo en todas las fuentes hasta encontrarlo."""
-        if not self.sources: return pd.DataFrame()
+        """Busca el dispositivo en la fuente única."""
+        if self.collection is None: return pd.DataFrame()
         
-        for source in self.sources:
-            try:
-                db = source["client"][source["db"]]
-                collection = db[source["coll"]]
+        try:
+            query = {
+                "$or": [
+                    {"device_id": device_id},
+                    {"dispositivo_id": device_id}
+                ]
+            }
+            
+            doc = self.collection.find_one(query, sort=[("timestamp", -1)])
+            if doc:
+                norm_doc = self._normalize_document(doc)
+                return self._rows_to_dataframe([norm_doc])
                 
-                query = {
-                    "$or": [
-                        {"device_id": device_id},
-                        {"dispositivo_id": device_id}
-                    ]
-                }
-                
-                doc = collection.find_one(query, sort=[("timestamp", -1)])
-                if doc:
-                    norm_doc = self._normalize_document(doc)
-                    return self._rows_to_dataframe([norm_doc])
-                    
-            except Exception:
-                continue
+        except Exception:
+            pass
                 
         return pd.DataFrame()
 
-    # --- METODOS PARA HISTORIAL Y GRAFICOS (Multi-DB Aggregation) ---
+    # --- METODOS PARA HISTORIAL Y GRAFICOS ---
     def fetch_data(self, start_date=None, end_date=None, device_ids=None, limit=5000) -> pd.DataFrame:
-        if not self.sources: return pd.DataFrame()
+        if self.collection is None: return pd.DataFrame()
         
-        all_norm_docs = []
-        
-        # Distribuir limite entre fuentes
-        limit_per_source = limit // len(self.sources) + 100
-        
-        for idx, source in enumerate(self.sources):
-            try:
-                db = source["client"][source["db"]]
-                collection = db[source["coll"]]
-                
-                mongo_query = {}
-                
-                if device_ids:
-                    mongo_query["$or"] = [
-                        {"device_id": {"$in": device_ids}},
-                        {"dispositivo_id": {"$in": device_ids}}
-                    ]
-                
-                raw_documents = []
-                
-                # Intentar con sort primero (obtiene datos recientes)
-                try:
-                    # Usar mismo limite para todas las fuentes
-                    cursor = collection.find(mongo_query).sort("_id", -1).limit(limit_per_source)
-                    raw_documents = list(cursor)
-                except Exception as sort_error:
-                    # Si falla el sort (memory limit), intentar sin sort
-                    if "memory" in str(sort_error).lower() or "Sort" in str(sort_error):
-                        # Cargar sin ordenar - se ordenara en Python despues
-                        cursor = collection.find(mongo_query).limit(limit_per_source)
-                        raw_documents = list(cursor)
-                    else:
-                        raise sort_error
-                
-                for d in raw_documents:
-                    all_norm_docs.append(self._normalize_document(d))
-                    
-            except Exception as e:
-                st.warning(f"Error parcial en {source['name']}: {str(e)[:100]}")
-                continue
-        
-        if not all_norm_docs:
-            return pd.DataFrame()
-            
-        # Ordenar todo lo combinado por fecha descendente
-        all_norm_docs.sort(key=lambda x: x["timestamp"] or datetime.min, reverse=True)
-        
-        # Convertir a DataFrame historial plano
-        df = self._parse_historical_flat(all_norm_docs)
-        
-        # Filtro de fechas en memoria (Pandas)
-        if not df.empty and (start_date or end_date):
-            if df['timestamp'].dt.tz is not None:
-                    df['timestamp'] = df['timestamp'].dt.tz_localize(None)
-            
-            if start_date:
-                if not isinstance(start_date, datetime): start_date = pd.to_datetime(start_date)
-                df = df[df['timestamp'] >= start_date]
-            
-            if end_date:
-                if not isinstance(end_date, datetime): end_date = pd.to_datetime(end_date)
-                df = df[df['timestamp'] <= end_date]
-        
-        return df
-
-    # --- MÉTODOS DE CONFIGURACIÓN (Solo en Fuente Principal) ---
-    # Por seguridad y simplicidad, guardamos configs solo en la DB principal
-    
-    def _get_primary_collection(self, coll_name):
-        if not self.sources: return None
-        # Asumimos que la primera fuente es la principal (donde guardamos configs)
-        source = self.sources[0]
         try:
-             return source["client"][source["db"]][coll_name]
-        except:
-             return None
+            mongo_query = {}
+            
+            if device_ids:
+                mongo_query["$or"] = [
+                    {"device_id": {"$in": device_ids}},
+                    {"dispositivo_id": {"$in": device_ids}}
+                ]
+            
+            # Filtro de fecha en Mongo si es posible (más eficiente)
+            # Nota: Requiere que start_date/end_date sean datetime y timestamp en BD sea Date o compatible
+            # Por seguridad lo mantenemos en Python como estaba, pero se podría optimizar aquí.
+            
+            raw_documents = []
+            try:
+                cursor = self.collection.find(mongo_query).sort("_id", -1).limit(limit)
+                raw_documents = list(cursor)
+            except Exception as sort_error:
+                 # Fallback si falla el sort por memoria
+                cursor = self.collection.find(mongo_query).limit(limit)
+                raw_documents = list(cursor)
+            
+            all_norm_docs = [self._normalize_document(d) for d in raw_documents]
+            
+            if not all_norm_docs:
+                return pd.DataFrame()
+                
+            # Ordenar por fecha descendente
+            all_norm_docs.sort(key=lambda x: x["timestamp"] or datetime.min, reverse=True)
+            
+            # Convertir a DataFrame historial plano
+            df = self._parse_historical_flat(all_norm_docs)
+            
+            # Filtro de fechas en memoria (Pandas)
+            if not df.empty and (start_date or end_date):
+                if df['timestamp'].dt.tz is not None:
+                        df['timestamp'] = df['timestamp'].dt.tz_localize(None)
+                
+                if start_date:
+                    if not isinstance(start_date, datetime): start_date = pd.to_datetime(start_date)
+                    df = df[df['timestamp'] >= start_date]
+                
+                if end_date:
+                    if not isinstance(end_date, datetime): end_date = pd.to_datetime(end_date)
+                    df = df[df['timestamp'] <= end_date]
+            
+            return df
+            
+        except Exception as e:
+            st.warning(f"Error fetching historical data: {str(e)}")
+            return pd.DataFrame()
+
+    # --- MÉTODOS DE CONFIGURACIÓN ---
+    
+    def _get_config_collection(self):
+        if self.db is not None:
+             return self.db[self.CONFIG_COLLECTION]
+        return None
 
     def get_config(self, config_id: str = "sensor_thresholds") -> Optional[Dict[str, Any]]:
-        coll = self._get_primary_collection(self.CONFIG_COLLECTION)
+        coll = self._get_config_collection()
         if coll is None: return None
         try:
             return coll.find_one({"_id": config_id})
@@ -312,7 +285,7 @@ class DatabaseConnection:
             return None
 
     def save_config(self, config_id: str, config_data: Dict[str, Any]) -> bool:
-        coll = self._get_primary_collection(self.CONFIG_COLLECTION)
+        coll = self._get_config_collection()
         if coll is None: return False
         try:
             config_data["_id"] = config_id
@@ -323,8 +296,69 @@ class DatabaseConnection:
             st.error(f"Error al guardar config: {str(e)}")
             return False
 
+    # --- MÉTODOS DE METADATOS DE DISPOSITIVOS ---
+    
+    def get_device_metadata(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Obtiene el documento de metadatos de un dispositivo específico."""
+        if self.devices_collection is None:
+            return None
+        try:
+            return self.devices_collection.find_one({"_id": device_id})
+        except Exception as e:
+            print(f"Error al obtener metadata del dispositivo {device_id}: {e}")
+            return None
+    
+    def get_all_devices_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Obtiene todos los documentos de dispositivos como un diccionario."""
+        if self.devices_collection is None:
+            return {}
+        try:
+            devices = self.devices_collection.find({})
+            # Convertir a dict con device_id como clave
+            result = {}
+            for dev in devices:
+                dev_id = dev.get("_id")
+                if dev_id:
+                    result[dev_id] = dev
+            return result
+        except Exception as e:
+            print(f"Error al obtener metadatos de dispositivos: {e}")
+            return {}
+    
+    def update_device_metadata(self, device_id: str, metadata: Dict[str, Any]) -> bool:
+        """Actualiza o crea el documento de metadatos de un dispositivo."""
+        if self.devices_collection is None:
+            return False
+        try:
+            metadata["_id"] = device_id
+            metadata["last_updated"] = datetime.now().isoformat()
+            result = self.devices_collection.replace_one(
+                {"_id": device_id}, 
+                metadata, 
+                upsert=True
+            )
+            return result.acknowledged
+        except Exception as e:
+            st.error(f"Error al actualizar metadata del dispositivo: {str(e)}")
+            return False
+    
+    def update_device_fields(self, device_id: str, fields: Dict[str, Any]) -> bool:
+        """Actualiza campos específicos de un dispositivo usando $set (preserva otros campos)."""
+        if self.devices_collection is None:
+            return False
+        try:
+            result = self.devices_collection.update_one(
+                {"_id": device_id},
+                {"$set": fields},
+                upsert=False  # No crear si no existe
+            )
+            return result.modified_count > 0 or result.matched_count > 0
+        except Exception as e:
+            st.error(f"Error al actualizar campos del dispositivo: {str(e)}")
+            return False
+
     def delete_config(self, config_id: str) -> bool:
-        coll = self._get_primary_collection(self.CONFIG_COLLECTION)
+        coll = self._get_config_collection()
         if coll is None: return False
         try:
             result = coll.delete_one({"_id": config_id})
@@ -332,7 +366,7 @@ class DatabaseConnection:
         except Exception:
             return False
 
-    # --- HELPERS DE DATAFRAME ---
+    # --- HELPERS DE DATAFRAME (Sin Cambios) ---
     
     def _rows_to_dataframe(self, norm_docs: List[Dict[str, Any]]) -> pd.DataFrame:
         """Convierte docs YA normalizados a DataFrame para Dashboard."""

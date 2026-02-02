@@ -140,93 +140,66 @@ def cargar_historial_completo() -> pd.DataFrame:
         start_time_total = time.time()
         db = DatabaseConnection()
         
-        if not db.sources:
+        if db.collection is None:
             return pd.DataFrame()
         
-        all_norm_docs = []
-        
-        # Definir TIEMPO DE CORTE común para todas las fuentes
-        # Esto asegura que si una fuente tarda más en cargar, no incluya datos
-        # posteriores al inicio de la carga, manteniendo la sincronización.
+        # Definir TIEMPO DE CORTE para sincronización
         cut_off_time = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-3))).replace(tzinfo=None)
         print(f"[graphs.py] Tiempo de corte de sincronización: {cut_off_time}")
         
         # Calcular fecha de inicio para la consulta (1 semana atrás + margen de 1 hora)
-        # Esto reduce drásticamente la cantidad de datos transferidos
         start_date = cut_off_time - timedelta(weeks=1, hours=1)
-        # Crear versiones del timestamp para diferentes formatos de BD
         start_date_iso = start_date.isoformat()
         
         print(f"[graphs.py] Limitando consulta a datos desde: {start_date}")
 
-        def load_source_data(source):
-            """Función auxiliar para cargar datos de una fuente individual."""
-            try:
-                database = source["client"][source["db"]]
-                collection = database[source["coll"]]
-                
-                # Proyección optimizada
-                projection = {
-                    '_id': 1, 'timestamp': 1, 'device_id': 1, 'dispositivo_id': 1,
-                    'sensors': 1, 'datos': 1, 'location': 1, 'metadata': 1
-                }
-                
-                # Construir Query con filtro de fecha (Soporta Date objects y ISO Strings)
-                # Usamos $or para cubrir ambos casos sin saber el esquema a priori
-                query = {
-                    "$or": [
-                        {"timestamp": {"$gte": start_date}},        # Para objetos Date (Victor)
-                        {"timestamp": {"$gte": start_date_iso}}     # Para strings ISO (Martin)
-                    ]
-                }
-                
-                # Cargar documentos (intenta sort, fallback a sin sort)
-                try:
-                    cursor = collection.find(query, projection).sort('timestamp', -1)
-                    raw_documents = list(cursor)
-                except Exception as sort_error:
-                    print(f"[graphs.py] Sort falló para {source['name']}: {sort_error}")
-                    cursor = collection.find(query, projection)
-                    raw_documents = list(cursor)
-                
-                print(f"[graphs.py] Fuente '{source['name']}': {len(raw_documents)} documentos cargados")
-                
-                # Normalizar documentos y FILTRAR por cut_off_time
-                source_docs = []
-                docs_futuros = 0
-                for doc in raw_documents:
-                    norm_doc = db._normalize_document(doc)
-                    ts = norm_doc.get("timestamp")
-                    
-                    if ts is not None and norm_doc.get("device_id") != "unknown":
-                        # Filtro de sincronización: ignorar datos posteriores al corte
-                        if ts > cut_off_time:
-                            docs_futuros += 1
-                            continue
-                            
-                        source_docs.append(norm_doc)
-                
-                print(f"[graphs.py] Fuente '{source['name']}': {len(source_docs)} documentos válidos ({docs_futuros} ignorados por ser posteriores al corte)")
-                return source_docs
-                
-            except Exception as e:
-                print(f"[graphs.py] ERROR cargando fuente {source['name']}: {str(e)}")
-                return []
-
-        # EJECUCIÓN PARALELA: Cargar todas las fuentes al mismo tiempo
-        # Esto reduce drásticamente el "gap" de tiempo entre una y otra
-        with ThreadPoolExecutor(max_workers=len(db.sources)) as executor:
-            future_to_source = {executor.submit(load_source_data,  s): s for s in db.sources}
-            
-            for future in as_completed(future_to_source):
-                docs = future.result()
-                all_norm_docs.extend(docs)
+        # Proyección optimizada
+        projection = {
+            '_id': 1, 'timestamp': 1, 'device_id': 1, 'dispositivo_id': 1,
+            'sensors': 1, 'datos': 1, 'location': 1, 'metadata': 1
+        }
         
-        if not all_norm_docs:
+        # Construir Query con filtro de fecha
+        query = {
+            "$or": [
+                {"timestamp": {"$gte": start_date}},        # Para objetos Date
+                {"timestamp": {"$gte": start_date_iso}}     # Para strings ISO
+            ]
+        }
+        
+        # Cargar documentos (intenta sort, fallback a sin sort)
+        try:
+            cursor = db.collection.find(query, projection).sort('timestamp', -1)
+            raw_documents = list(cursor)
+        except Exception as sort_error:
+            print(f"[graphs.py] Sort falló: {sort_error}")
+            cursor = db.collection.find(query, projection)
+            raw_documents = list(cursor)
+        
+        print(f"[graphs.py] {len(raw_documents)} documentos cargados")
+        
+        # Normalizar documentos y FILTRAR por cut_off_time
+        valid_docs = []
+        docs_futuros = 0
+        for doc in raw_documents:
+            norm_doc = db._normalize_document(doc)
+            ts = norm_doc.get("timestamp")
+            
+            if ts is not None and norm_doc.get("device_id") != "unknown":
+                # Filtro de sincronización: ignorar datos posteriores al corte
+                if ts > cut_off_time:
+                    docs_futuros += 1
+                    continue
+                    
+                valid_docs.append(norm_doc)
+        
+        print(f"[graphs.py] {len(valid_docs)} documentos válidos ({docs_futuros} ignorados por ser posteriores al corte)")
+        
+        if not valid_docs:
             return pd.DataFrame()
         
         # Convertir a DataFrame flat
-        df = db._parse_historical_flat(all_norm_docs)
+        df = db._parse_historical_flat(valid_docs)
         
         # Normalizar columnas de sensores
         df = normalize_sensor_columns(df)
@@ -234,7 +207,6 @@ def cargar_historial_completo() -> pd.DataFrame:
         # =====================================================================
         # FILTRAR TIMESTAMPS INVÁLIDOS
         # Excluir registros con fechas anteriores a 2020 (datos corruptos)
-        # Esto elimina timestamps epoch=0 que aparecen como 1970
         # =====================================================================
         if 'timestamp' in df.columns and not df.empty:
             fecha_minima_valida = pd.Timestamp('2020-01-01')
@@ -251,19 +223,19 @@ def cargar_historial_completo() -> pd.DataFrame:
         elapsed_time = time.time() - start_time_total
         print(f"[graphs.py] Tiempo total de carga y procesamiento: {elapsed_time:.2f} segundos")
         
-        # DEBUG: Mostrar t_max por dispositivo inmediatamente después de cargar
+        # DEBUG: Mostrar t_max por dispositivo
         if 'timestamp' in df.columns and 'device_id' in df.columns and not df.empty:
             print(f"\n[graphs.py] === DATOS CARGADOS (t_max por dispositivo) ===")
             device_summary = df.groupby('device_id')['timestamp'].agg(['max', 'count']).reset_index()
             for _, row in device_summary.iterrows():
                 print(f"  - {row['device_id']}: último dato = {row['max']} ({row['count']} registros)")
-            print(f"  [Hora actual del servidor: no disponible, ver hora en consola]")
         
         return df
         
     except Exception as e:
         st.error(f"Error cargando historial: {str(e)}")
         return pd.DataFrame()
+
 
 
 def filtrar_dataframe(

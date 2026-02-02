@@ -96,9 +96,15 @@ def show_view():
             if not all_ids:
                 st.info("No se han detectado dispositivos.")
             else:
+                # Función para mostrar nombres legibles
+                def format_device_display(dev_id):
+                    dev_meta = metadata.get(dev_id, {})
+                    alias = dev_meta.get("alias", dev_id)
+                    return f"{alias} ({dev_id[:8]}...)" if len(dev_id) > 8 else alias
+                
                 c_sel, c_edit = st.columns([1, 2])
                 with c_sel:
-                    selected_id = st.selectbox("Selecciona ID Técnico", all_ids)
+                    selected_id = st.selectbox("Selecciona ID Técnico", all_ids, format_func=format_device_display)
                     curr_meta = metadata.get(selected_id, {})
                 
                 with c_edit:
@@ -123,8 +129,14 @@ def show_view():
             if not all_ids:
                 st.warning("Sin dispositivos disponibles.")
             else:
+                # Crear función de formato para mostrar nombres en lugar de IDs
+                def format_device_name(dev_id):
+                    dev_meta = metadata.get(dev_id, {})
+                    alias = dev_meta.get("alias", dev_id)
+                    return f"{alias} ({dev_id[:8]}...)" if len(dev_id) > 8 else alias
+                
                 # 1. Seleccionar Dispositivo
-                target_dev = st.selectbox("1. Dispositivo", all_ids, key="thr_dev_sel")
+                target_dev = st.selectbox("1. Dispositivo", all_ids, key="thr_dev_sel", format_func=format_device_name)
                 
                 # 2. Descubrir Parámetros
                 valid_params = discover_available_params(recent_df, target_dev)

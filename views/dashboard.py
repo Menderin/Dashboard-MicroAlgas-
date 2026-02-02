@@ -425,10 +425,12 @@ def build_card_html(device: DeviceInfo, thresholds: Dict, config_manager: Config
     
     if config_manager:
         meta = config_manager.get_device_info(device.device_id)
-        if meta.get("alias", "").strip(): 
-            display_name = meta.get("alias")
-        if meta.get("location", "").strip(): 
-            display_loc = meta.get("location")
+        alias_val = meta.get("alias", "")
+        if alias_val and alias_val.strip(): 
+            display_name = alias_val
+        location_val = meta.get("location", "")
+        if location_val and location_val.strip(): 
+            display_loc = location_val
     
     # Determinar estado y colores
     is_offline = device.connection == ConnectionStatus.OFFLINE

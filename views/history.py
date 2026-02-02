@@ -32,8 +32,6 @@ def cargar_datos_rango(start_date: datetime, end_date: datetime, devices: Option
     start_time_total = time.time()
     
     # 1. Extender rango de búsqueda en DB generosamente (+/- 2 días)
-    # Esto asegura traer todos los registros desplazados por UTC antes de filtrar exactamente.
-    # El problema anterior era que +1 día a las 00:00 cortaba datos de las 02:00 UTC.
     mongo_end_date = end_date + timedelta(days=2)
     mongo_start_date = start_date - timedelta(days=2)
     
@@ -43,85 +41,67 @@ def cargar_datos_rango(start_date: datetime, end_date: datetime, devices: Option
 
     try:
         db = DatabaseConnection()
-        if not db.sources: return pd.DataFrame()
+        if db.collection is None:
+            return pd.DataFrame()
 
         start_iso = start_date.isoformat()
         mongo_start_iso = mongo_start_date.isoformat()
         mongo_end_iso = mongo_end_date.isoformat()
         
-        all_norm_docs = []
-
-        def load_source(source):
-            try:
-                database = source["client"][source["db"]]
-                collection = database[source["coll"]]
+        # Base Query de tiempo EXTENDIDA
+        time_query = {
+            "$or": [
+                {"timestamp": {"$gte": mongo_start_date, "$lte": mongo_end_date}},
+                {"timestamp": {"$gte": mongo_start_iso, "$lte": mongo_end_iso}}
+            ]
+        }
+        
+        projection = {
+            '_id': 1, 'timestamp': 1, 'device_id': 1, 'dispositivo_id': 1,
+            'sensors': 1, 'datos': 1, 'location': 1, 'metadata': 1
+        }
+        
+        # Sin sort en DB para velocidad
+        cursor = db.collection.find(time_query, projection)
+        raw_docs = list(cursor)
+        
+        valid_docs = []
+        for doc in raw_docs:
+            norm = db._normalize_document(doc)
+            if norm.get("timestamp") and norm.get("device_id") != "unknown":
                 
-                # Base Query de tiempo EXTENDIDA AMBOS LADOS (+/- 1 DIA)
-                time_query = {
-                    "$or": [
-                        {"timestamp": {"$gte": mongo_start_date, "$lte": mongo_end_date}},
-                        {"timestamp": {"$gte": mongo_start_iso, "$lte": mongo_end_iso}}
-                    ]
-                }
+                # FILTRO DE DISPOSITIVOS (EN MEMORIA)
+                if devices and norm.get("device_id") not in devices:
+                    continue
+
+                ts = norm["timestamp"]
                 
-                projection = {
-                    '_id': 1, 'timestamp': 1, 'device_id': 1, 'dispositivo_id': 1,
-                    'sensors': 1, 'datos': 1, 'location': 1, 'metadata': 1
-                }
+                if isinstance(ts, str):
+                    ts = pd.to_datetime(ts)
                 
-                # Sin sort en DB para velocidad
-                final_query = time_query
-                cursor = collection.find(final_query, projection)
-                raw_docs = list(cursor)
+                # CONVERSIÓN EXPLÍCITA A UTC-3 (CHILE)
+                target_offset = timedelta(hours=-3)
                 
-                valid_docs = []
-                for doc in raw_docs:
-                    norm = db._normalize_document(doc)
-                    if norm.get("timestamp") and norm.get("device_id") != "unknown":
-                        
-                        # FILTRO DE DISPOSITIVOS (EN MEMORIA)
-                        if devices and norm.get("device_id") not in devices:
-                            continue
+                if isinstance(ts, datetime):
+                    if ts.tzinfo is not None:
+                        ts_utc = ts.astimezone(timezone.utc)
+                        ts_local = ts_utc + target_offset
+                        ts = ts_local.replace(tzinfo=None)
+                    else:
+                        # Naive: Asumimos ya local
+                        pass
+                
+                norm["timestamp"] = ts
+                
+                # Filtro FINAL EXACTO
+                if start_date <= ts <= end_date:
+                    valid_docs.append(norm)
 
-                        ts = norm["timestamp"]
-                        ts_orig = ts # Para debug
-                        
-                        if isinstance(ts, str):
-                            ts = pd.to_datetime(ts)
-                        
-                        # CONVERSIÓN EXPLÍCITA A UTC-3 (CHILE)
-                        target_offset = timedelta(hours=-3)
-                        
-                        if isinstance(ts, datetime):
-                            if ts.tzinfo is not None:
-                                ts_utc = ts.astimezone(timezone.utc)
-                                ts_local = ts_utc + target_offset
-                                ts = ts_local.replace(tzinfo=None)
-                            else:
-                                # Naive: Asumimos ya local
-                                pass
-                        
-                        norm["timestamp"] = ts
-                        
-                        # Filtro FINAL EXACTO (Sin buffer, ya convertimos a local)
-                        if start_date <= ts <= end_date:
-                            valid_docs.append(norm)
-
-                return valid_docs
-            except Exception as e:
-                print(f"[history.py] Error en {source.get('name')}: {e}")
-                return []
-
-        # Ejecución Paralela
-        with ThreadPoolExecutor(max_workers=len(db.sources)) as executor:
-            futures = [executor.submit(load_source, s) for s in db.sources]
-            for f in as_completed(futures):
-                all_norm_docs.extend(f.result())
-
-        if not all_norm_docs: return pd.DataFrame()
+        if not valid_docs:
+            return pd.DataFrame()
 
         # Convertir a DataFrame
-        df = db._parse_historical_flat(all_norm_docs)
+        df = db._parse_historical_flat(valid_docs)
         
         # Limpieza columnas
         try:
