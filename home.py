@@ -70,14 +70,154 @@ def route_to_page():
         settings.show_view()
 
 
+def show_login_page():
+    """Muestra la página de login con contraseña."""
+    st.markdown("""
+    <style>
+    /* Ocultar elementos de Streamlit */
+    header[data-testid="stHeader"], #MainMenu, footer {
+        display: none;
+    }
+    
+    /* Fondo con gradiente verde */
+    .stApp {
+        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        min-height: 100vh;
+    }
+    
+    .block-container {
+        padding-top: 0 !important;
+        max-width: 100% !important;
+    }
+    
+    /* Card de login con glassmorphism */
+    .login-card {
+        max-width: 420px;
+        margin: 120px auto 0 auto;
+        padding: 50px 40px;
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 24px;
+        box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+        text-align: center;
+    }
+    
+    .login-icon {
+        font-size: 60px;
+        margin-bottom: 20px;
+    }
+    
+    .login-title {
+        color: #1e293b;
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        letter-spacing: -0.5px;
+    }
+    
+    .login-subtitle {
+        color: #64748b;
+        font-size: 16px;
+        margin-bottom: 35px;
+        font-weight: 400;
+    }
+    
+    .login-divider {
+        width: 60px;
+        height: 4px;
+        background: linear-gradient(90deg, #11998e, #38ef7d);
+        margin: 0 auto 30px auto;
+        border-radius: 2px;
+    }
+    
+    /* Estilo del input */
+    .stTextInput > div > div > input {
+        border-radius: 12px !important;
+        border: 2px solid #e2e8f0 !important;
+        padding: 15px 20px !important;
+        font-size: 16px !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    .stTextInput > div > div > input:focus {
+        border-color: #11998e !important;
+        box-shadow: 0 0 0 3px rgba(17, 153, 142, 0.15) !important;
+    }
+    
+    /* Botón verde que combina con fondo */
+    .stFormSubmitButton > button {
+        background: linear-gradient(90deg, #11998e, #38ef7d) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 15px 30px !important;
+        font-size: 16px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.5px;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 4px 15px rgba(17, 153, 142, 0.4) !important;
+    }
+    
+    .stFormSubmitButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 8px 25px rgba(17, 153, 142, 0.5) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Card de login con emoji de alga/planta
+    st.markdown('''
+    <div class="login-card">
+        <div class="login-icon">🌿</div>
+        <div class="login-title">Sistema de Monitoreo</div>
+        <div class="login-subtitle">Cultivo de Microalgas</div>
+        <div class="login-divider"></div>
+    </div>
+    ''', unsafe_allow_html=True)
+    
+    # Formulario centrado
+    _, center, _ = st.columns([1.2, 1, 1.2])
+    with center:
+        with st.form("login_form"):
+            password = st.text_input("Contraseña", type="password", label_visibility="collapsed", placeholder="🔒 Ingrese contraseña")
+            st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+            submitted = st.form_submit_button("Ingresar", use_container_width=True, type="primary")
+            
+            if submitted:
+                site_password = os.getenv("SITE_PASSWORD", "")
+                if password == site_password:
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("❌ Contraseña incorrecta")
+
+
+def render_logout_button():
+    """Botón de cerrar sesión en el sidebar."""
+    with st.sidebar:
+        st.divider()
+        if st.button("🚪 Cerrar Sesión", use_container_width=True):
+            st.session_state.authenticated = False
+            st.rerun()
+
+
 def main():
     st.set_page_config(
         page_title="Sistema de Monitoreo",
-        page_icon=None,
+        page_icon="🔬",
         layout="wide",
         initial_sidebar_state="collapsed"
     )
     
+    # Inicializar estado de autenticación
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    
+    # Verificar autenticación
+    if not st.session_state.authenticated:
+        show_login_page()
+        return
+    
+    # Si está autenticado, mostrar dashboard
     apply_custom_styles()
     initialize_session_state()
     
@@ -91,6 +231,7 @@ def main():
         
     render_header(connected=is_connected)
     render_navigation()
+    render_logout_button()
     
     st.divider()
     
