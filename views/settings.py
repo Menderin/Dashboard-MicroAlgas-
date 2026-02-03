@@ -147,72 +147,120 @@ def show_view():
                     if st.checkbox("Ver Debug Data"):
                          st.write(recent_df[recent_df['device_id']==target_dev].head(1).to_dict())
                 else:
-                    target_param = st.selectbox("2. Parámetro", valid_params, format_func=lambda x: str(x).replace('_', ' ').title())
+                    target_param = st.selectbox("Parámetro", valid_params, format_func=lambda x: str(x).replace('_', ' ').title())
                     
                     # Cargar Conf
                     base_conf = config_manager.get_all_configured_sensors().get(target_param, {})
-                    dev_specifics = config_manager.get_device_thresholds(target_dev)
+                    dev_specifics_raw = config_manager.get_device_thresholds(target_dev)
+                    
+                    # COMPATIBILIDAD: Convertir formato antiguo (ph_min, temp_max, etc.) a nuevo formato
+                    # Si los umbrales están en formato plano, convertirlos
+                    dev_specifics = {}
+                    if dev_specifics_raw:
+                        # Verificar si tiene formato nuevo (agrupado por parámetro)
+                        has_new_format = any(isinstance(v, dict) and 'min_value' in v for v in dev_specifics_raw.values())
+                        
+                        if not has_new_format:
+                            # Convertir formato antiguo a nuevo
+                            # Mapear {ph_min: 6, ph_max: 8.2, temp_max: 30} 
+                            # a {ph: {min_value: 6, max_value: 8.2}, temperatura: {max_value: 30}}
+                            param_map = {
+                                'ph': 'ph',
+                                'temperatura': 'temperatura',
+                                'temperature': 'temperatura',
+                                'temp': 'temperatura'
+                            }
+                            
+                            for key, value in dev_specifics_raw.items():
+                                # Parsear keys como "ph_min", "temp_max", etc.
+                                parts = key.lower().split('_')
+                                if len(parts) >= 2:
+                                    param_name = '_'.join(parts[:-1])  # todo menos el último
+                                    threshold_type = parts[-1]  # min, max, etc
+                                    
+                                    # Normalizar nombre del parámetro
+                                    normalized_param = param_map.get(param_name, param_name)
+                                    
+                                    if normalized_param not in dev_specifics:
+                                        dev_specifics[normalized_param] = {}
+                                    
+                                    # Mapear el tipo de umbral
+                                    if threshold_type == 'min':
+                                        dev_specifics[normalized_param]['min_value'] = float(value)
+                                    elif threshold_type == 'max':
+                                        dev_specifics[normalized_param]['max_value'] = float(value)
+                        else:
+                            dev_specifics = dev_specifics_raw
+                    
                     current_conf = dev_specifics.get(target_param, base_conf)
                     
-                    # Get Values
-                    d_cmin = float(current_conf.get("critical_min", 0.0))
+                    # Get Values - Solo min y max
                     d_omin = float(current_conf.get("min_value", 4.0))
                     d_omax = float(current_conf.get("max_value", 8.0))
-                    d_cmax = float(current_conf.get("critical_max", 12.0))
+                    
+                    # Calcular zonas automáticas (20% del rango)
+                    range_size = d_omax - d_omin
+                    alert_margin = range_size * 0.20
+                    calc_alert_min = d_omin + alert_margin
+                    calc_alert_max = d_omax - alert_margin
 
                     # 3. Form
                     st.markdown("---")
-                    st.markdown(f"**Rangos para '{target_param.upper()}' en '{target_dev}'**")
+                    st.markdown(f"**Rangos para '{target_param.upper()}' en '{format_device_name(target_dev)}'**")
+                    
+                    # Información sobre el cálculo automático
+                    st.info("ℹ **Cálculo Automático de Zonas**: El sistema calcula automáticamente las zonas de alerta (20% del rango) y crítico (fuera del rango). Solo necesitas definir el rango seguro mínimo y máximo.")
                     
                     with st.form(f"range_form_{target_dev}"):
-                        c1, c2, c3 = st.columns(3)
+                        # Solo 2 inputs: min y max del rango seguro
+                        c1, c2 = st.columns(2)
                         
                         with c1:
-                            st.markdown(f"**Zona Baja** {ICON_WARN}", unsafe_allow_html=True)
-                            val_crit_min = st.number_input("Mínimo Crítico (Muerte)", value=d_cmin, step=0.1)
-                            val_opt_min = st.number_input("Inicio Normalidad", value=d_omin, step=0.1)
+                            st.markdown("**Valor Mínimo Seguro**")
+                            val_opt_min = st.number_input("Mínimo del rango seguro", value=d_omin, step=0.1, 
+                                                         help="Valor mínimo aceptable para condiciones normales")
                             
                         with c2:
-                            st.markdown(f"**Zona Ideal** {ICON_CHECK}", unsafe_allow_html=True)
-                            # Usando markdown con background verde
-                            st.markdown(f"""
-                            <div style="background-color: #dcfce7; color: #166534; padding: 10px; border-radius: 8px; border: 1px solid #86efac; text-align: center; font-weight: 600;">
-                                <span style="vertical-align: middle;">{ICON_CHECK}</span> Rango Seguro<br>
-                                {val_opt_min} a {d_omax}
-                            </div>
-                            """, unsafe_allow_html=True)
+                            st.markdown("** Valor Máximo Seguro**")
+                            val_opt_max = st.number_input("Máximo del rango seguro", value=d_omax, step=0.1,
+                                                         help="Valor máximo aceptable para condiciones normales")
                         
-                        with c3:
-                            st.markdown(f"**Zona Alta** {ICON_WARN}", unsafe_allow_html=True)
-                            val_opt_max = st.number_input("Fin Normalidad", value=d_omax, step=0.1)
-                            val_crit_max = st.number_input("Máximo Crítico (Muerte)", value=d_cmax, step=0.1)
-
                         # Logic check
                         err = None
-                        if val_crit_min >= val_opt_min: err = "Crit Min >= Opt Min"
-                        elif val_opt_min >= val_opt_max: err = "Opt Min >= Opt Max"
-                        elif val_opt_max >= val_crit_max: err = "Opt Max >= Crit Max"
+                        if val_opt_min >= val_opt_max: 
+                            err = "El mínimo debe ser menor que el máximo"
                         
                         if err:
-                            st.error(f"Error Lógico: {err}")
+                            st.error(f" {err}")
 
-                        submitted = st.form_submit_button("Guardar Umbrales", type="primary", width="stretch")
+                        submitted = st.form_submit_button(" Guardar Umbrales", type="primary", use_container_width=True)
                         
                         if submitted:
                             if err:
                                 st.error(f"No se puede guardar: {err}")
                             else:
-                                new_data = current_conf.copy()
-                                new_data.update({
-                                    "min_value": val_opt_min,
-                                    "max_value": val_opt_max,
-                                    "critical_min": val_crit_min,
-                                    "critical_max": val_crit_max,
-                                    "label": target_param.replace('_',' ').title()
-                                })
+                                # Guardar en formato PLANO (temp_min, temp_max) en lugar de objetos anidados
+                                # Normalizar nombre de parámetro para claves
+                                param_key = target_param.lower().replace('temperature', 'temp').replace('temperatura', 'temp')
                                 
-                                if config_manager.update_device_threshold(target_dev, target_param, new_data):
-                                    st.success(f"Configuración guardada para {target_param}.")
+                                # Crear claves planas
+                                min_key = f"{param_key}_min"
+                                max_key = f"{param_key}_max"
+                                
+                                # Preparar data para guardar en formato plano
+                                flat_data = {
+                                    min_key: val_opt_min,
+                                    max_key: val_opt_max
+                                }
+                                
+                                # Usar DatabaseConnection que ya está importada al inicio del archivo
+                                db = DatabaseConnection()
+                                
+                                # Actualizar múltiples campos a la vez en formato plano
+                                success = db.update_device_fields(target_dev, {f"umbrales.{k}": v for k, v in flat_data.items()})
+                                
+                                if success:
+                                    st.success(f" Umbrales guardados para {target_param}. Zonas de alerta y crítico se calcularán automáticamente.")
                                     st.rerun()
                                 else:
-                                    st.error("Error al guardar.")
+                                    st.error(" Error al guardar.")

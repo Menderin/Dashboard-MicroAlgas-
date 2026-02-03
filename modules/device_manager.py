@@ -126,6 +126,19 @@ class DeviceManager:
             
         new_health = HealthStatus.OK
         
+        # Mapeo de nombres de sensores (inglés <-> español)
+        sensor_name_map = {
+            'temperature': 'temperatura',
+            'temp': 'temperatura',
+            'ph': 'ph',
+            'dissolved_oxygen': 'do',
+            'do': 'do',
+            'orp': 'orp',
+            'ec': 'ec',
+            'turbidity': 'turbidez',
+            'turbidez': 'turbidez'
+        }
+        
         # Obtener Thresholds Específicos de este dispositivo (normalizar keys a lowercase)
         raw_dev_thresholds = self.device_specific_thresholds.get(device_id, {})
         dev_thresholds = {k.lower(): v for k, v in raw_dev_thresholds.items()}
@@ -134,10 +147,13 @@ class DeviceManager:
         global_lower = {k.lower(): v for k, v in self.global_thresholds.items()}
         
         for sensor, value in sensors.items():
-            sensor_key = sensor.lower() # Normalizar nombre del sensor a lowercase
+            sensor_key = sensor.lower()
             
-            # Buscar config: Específica > Global (ambas normalizadas)
-            config = dev_thresholds.get(sensor_key, global_lower.get(sensor_key))
+            # Normalizar nombre del sensor para buscar en umbrales
+            normalized_key = sensor_name_map.get(sensor_key, sensor_key)
+            
+            # Buscar config: Específica > Global (usando nombre normalizado)
+            config = dev_thresholds.get(normalized_key, global_lower.get(sensor_key))
             
             if not config: continue
             
@@ -147,20 +163,49 @@ class DeviceManager:
             # Personalizados: min_value, max_value, critical_min, critical_max
             # Defaults JSON: min, max, optimal_min, optimal_max
             
-            c_min = float(config.get("critical_min", config.get("min", -9999)))
-            c_max = float(config.get("critical_max", config.get("max", 9999)))
-            o_min = float(config.get("min_value", config.get("optimal_min", -9999))) 
-            o_max = float(config.get("max_value", config.get("optimal_max", 9999)))
+            # Obtener rango seguro (óptimo)
+            o_min = float(config.get("min_value", config.get("optimal_min", config.get("min", -9999)))) 
+            o_max = float(config.get("max_value", config.get("optimal_max", config.get("max", 9999))))
             
-            # Evaluación
-            state = HealthStatus.OK
+            # Calcular umbrales críticos y de alerta automáticamente si no están definidos
+            # Si solo tienen min_value y max_value, calculamos:
+            # - Zona de alerta: 20% del rango desde los límites
+            # - Zona crítica: fuera del rango seguro
             
-            # Critico
-            if value < c_min or value > c_max:
-                state = HealthStatus.CRITICAL
-            # Warning (Zona entre Crítico y Óptimo)
-            elif value < o_min or value > o_max:
-                state = HealthStatus.WARNING
+            has_explicit_critical = "critical_min" in config or "critical_max" in config
+            
+            if has_explicit_critical:
+                # Usar valores explícitos si están definidos
+                c_min = float(config.get("critical_min", config.get("min", -9999)))
+                c_max = float(config.get("critical_max", config.get("max", 9999)))
+                
+                # Evaluación con zonas explícitas
+                state = HealthStatus.OK
+                
+                # Critico
+                if value < c_min or value > c_max:
+                    state = HealthStatus.CRITICAL
+                # Warning (Zona entre Crítico y Óptimo)
+                elif value < o_min or value > o_max:
+                    state = HealthStatus.WARNING
+            else:
+                # Cálculo automático de zonas basado en 20% del rango
+                range_size = o_max - o_min
+                alert_margin = range_size * 0.20  # 20% del rango
+                
+                # Zona de alerta: cuando el valor se acerca al 20% del límite
+                # Ejemplo: rango 0-10 → alerta <2 o >8, crítico <0 o >10
+                alert_min = o_min + alert_margin
+                alert_max = o_max - alert_margin
+                
+                state = HealthStatus.OK
+                
+                # Crítico: fuera del rango seguro
+                if value < o_min or value > o_max:
+                    state = HealthStatus.CRITICAL
+                # Alerta: dentro del rango pero en la zona de 20%
+                elif value < alert_min or value > alert_max:
+                    state = HealthStatus.WARNING
             
             # Prioridad de Estados: Critical > Warning > OK
             if state == HealthStatus.CRITICAL:

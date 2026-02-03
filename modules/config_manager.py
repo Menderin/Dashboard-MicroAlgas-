@@ -135,15 +135,58 @@ class ConfigManager:
     DEVICES_CONFIG_ID = "device_metadata"
 
     def get_device_metadata(self) -> Dict[str, Dict[str, str]]:
-        """Recupera los metadatos de dispositivos (alias, ubicación)."""
+        """Recupera los metadatos de dispositivos (alias, ubicación, umbrales)."""
         all_devices = self.db.get_all_devices_metadata()
         
-        # Mapear nombre->alias y ubicacion->location para compatibilidad con código existente
+        # Mapear nombre->alias, ubicacion->location, umbrales->thresholds para compatibilidad
         result = {}
         for dev_id, dev_data in all_devices.items():
+            raw_umbrales = dev_data.get("umbrales", {})
+            
+            # CONVERTIR formato plano (temp_min, ph_max) a formato estructurado
+            # Entrada: {temp_min: 16, temp_max: 29, ph_min: 6, ph_max: 8.2}
+            # Salida: {temperatura: {min_value: 16, max_value: 29}, ph: {min_value: 6, max_value: 8.2}}
+            structured_thresholds = {}
+            
+            # Mapeo de prefijos a nombres de sensores
+            prefix_to_sensor = {
+                'temp': 'temperatura',
+                'temperatura': 'temperatura',
+                'ph': 'ph',
+                'do': 'do',             # Dissolved oxygen
+                'orp': 'orp',           # ORP
+                'ec': 'ec',             # Electrical conductivity
+                'turbidez': 'turbidez'
+            }
+            
+            for key, value in raw_umbrales.items():
+                # Ignorar objetos anidados (formato antiguo ya convertido)
+                if isinstance(value, dict) or isinstance(value, list):
+                    continue
+                
+                # Parsear keys como "temp_min", "ph_max", etc.
+                key_lower = key.lower()
+                parts = key_lower.rsplit('_', 1)  # Dividir desde la derecha
+                
+                if len(parts) == 2:
+                    prefix, threshold_type = parts
+                    
+                    # Obtener nombre del sensor normalizado
+                    sensor_name = prefix_to_sensor.get(prefix, prefix)
+                    
+                    if sensor_name not in structured_thresholds:
+                        structured_thresholds[sensor_name] = {}
+                    
+                    # Mapear el tipo de umbral
+                    if threshold_type == 'min':
+                        structured_thresholds[sensor_name]['min_value'] = float(value)
+                    elif threshold_type == 'max':
+                        structured_thresholds[sensor_name]['max_value'] = float(value)
+            
             result[dev_id] = {
-                "alias": dev_data.get("nombre", dev_id),  # nombre es el campo real
-                "location": dev_data.get("ubicacion", "Desconocido")  # ubicacion es el campo real
+                "alias": dev_data.get("nombre", dev_id),
+                "location": dev_data.get("ubicacion", "Desconocido"),
+                "thresholds": structured_thresholds
             }
         return result
 
