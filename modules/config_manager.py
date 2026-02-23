@@ -152,11 +152,22 @@ class ConfigManager:
             prefix_to_sensor = {
                 'temp': 'temperatura',
                 'temperatura': 'temperatura',
+                'temperature': 'temperatura',  # Formato nuevo (nombre canónico)
                 'ph': 'ph',
                 'do': 'do',             # Dissolved oxygen
+                'oxygen': 'do',         # Alias de oxígeno
                 'orp': 'orp',           # ORP
                 'ec': 'ec',             # Electrical conductivity
-                'turbidez': 'turbidez'
+                'turbidez': 'turbidez',
+                'saturation': 'saturation',
+                'ammonia': 'ammonia',
+                'nitrite': 'nitrite',
+                'nitrate': 'nitrate',
+                'alkalinity': 'alkalinity',
+                'phosphate': 'phosphate',
+                'hardness': 'hardness',
+                'tss': 'tss',
+                'biofloc_index': 'biofloc_index',
             }
             
             for key, value in raw_umbrales.items():

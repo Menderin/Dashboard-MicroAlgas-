@@ -153,38 +153,53 @@ def show_view():
                     base_conf = config_manager.get_all_configured_sensors().get(target_param, {})
                     dev_specifics_raw = config_manager.get_device_thresholds(target_dev)
                     
-                    # COMPATIBILIDAD: Convertir formato antiguo (ph_min, temp_max, etc.) a nuevo formato
-                    # Si los umbrales están en formato plano, convertirlos
+                    # COMPATIBILIDAD: Convertir formato plano (ph_min, temp_max, etc.) a formato estructurado
                     dev_specifics = {}
                     if dev_specifics_raw:
                         # Verificar si tiene formato nuevo (agrupado por parámetro)
                         has_new_format = any(isinstance(v, dict) and 'min_value' in v for v in dev_specifics_raw.values())
                         
                         if not has_new_format:
-                            # Convertir formato antiguo a nuevo
-                            # Mapear {ph_min: 6, ph_max: 8.2, temp_max: 30} 
-                            # a {ph: {min_value: 6, max_value: 8.2}, temperatura: {max_value: 30}}
-                            param_map = {
+                            # Convertir formato plano a estructurado
+                            # Mapear {ph_min: 6, ph_max: 8.2, temperature_min: 26, temp_max: 29}
+                            # a {ph: {min_value: 6, max_value: 8.2}, temperature: {min_value: 26, max_value: 29}}
+                            # Mapeo de prefijos almacenados → nombre canónico del sensor (como aparece en los datos)
+                            prefix_to_canonical = {
+                                'temp': 'temperature',
+                                'temperatura': 'temperature',
+                                'temperature': 'temperature',
                                 'ph': 'ph',
-                                'temperatura': 'temperatura',
-                                'temperature': 'temperatura',
-                                'temp': 'temperatura'
+                                'do': 'do',
+                                'oxygen': 'oxygen',
+                                'saturation': 'saturation',
+                                'ammonia': 'ammonia',
+                                'nitrite': 'nitrite',
+                                'nitrate': 'nitrate',
+                                'alkalinity': 'alkalinity',
+                                'phosphate': 'phosphate',
+                                'hardness': 'hardness',
+                                'tss': 'tss',
+                                'biofloc_index': 'biofloc_index',
+                                'ec': 'ec',
+                                'orp': 'orp',
+                                'turbidez': 'turbidez',
                             }
                             
                             for key, value in dev_specifics_raw.items():
-                                # Parsear keys como "ph_min", "temp_max", etc.
-                                parts = key.lower().split('_')
-                                if len(parts) >= 2:
-                                    param_name = '_'.join(parts[:-1])  # todo menos el último
-                                    threshold_type = parts[-1]  # min, max, etc
+                                if isinstance(value, (dict, list)):
+                                    continue
+                                # Parsear keys como "ph_min", "temperature_max", etc.
+                                parts = key.lower().rsplit('_', 1)  # Dividir desde la derecha
+                                if len(parts) == 2:
+                                    param_name = parts[0]
+                                    threshold_type = parts[1]
                                     
-                                    # Normalizar nombre del parámetro
-                                    normalized_param = param_map.get(param_name, param_name)
+                                    # Normalizar al nombre canónico del sensor
+                                    normalized_param = prefix_to_canonical.get(param_name, param_name)
                                     
                                     if normalized_param not in dev_specifics:
                                         dev_specifics[normalized_param] = {}
                                     
-                                    # Mapear el tipo de umbral
                                     if threshold_type == 'min':
                                         dev_specifics[normalized_param]['min_value'] = float(value)
                                     elif threshold_type == 'max':
@@ -194,9 +209,9 @@ def show_view():
                     
                     current_conf = dev_specifics.get(target_param, base_conf)
                     
-                    # Get Values - Solo min y max
-                    d_omin = float(current_conf.get("min_value", 4.0))
-                    d_omax = float(current_conf.get("max_value", 8.0))
+                    # Get Values - Solo min y max (con fallback a optimal_min/optimal_max de defaults globales)
+                    d_omin = float(current_conf.get("min_value", current_conf.get("optimal_min", current_conf.get("min", 4.0))))
+                    d_omax = float(current_conf.get("max_value", current_conf.get("optimal_max", current_conf.get("max", 8.0))))
                     
                     # Calcular zonas automáticas (20% del rango)
                     range_size = d_omax - d_omin
@@ -239,9 +254,9 @@ def show_view():
                             if err:
                                 st.error(f"No se puede guardar: {err}")
                             else:
-                                # Guardar en formato PLANO (temp_min, temp_max) en lugar de objetos anidados
-                                # Normalizar nombre de parámetro para claves
-                                param_key = target_param.lower().replace('temperature', 'temp').replace('temperatura', 'temp')
+                                # Guardar en formato PLANO (temperature_min, ph_max) en lugar de objetos anidados
+                                # Usar el nombre canónico del parámetro tal como viene de los datos
+                                param_key = target_param.lower()
                                 
                                 # Crear claves planas
                                 min_key = f"{param_key}_min"

@@ -350,9 +350,9 @@ class DatabaseConnection:
             result = self.devices_collection.update_one(
                 {"_id": device_id},
                 {"$set": fields},
-                upsert=False  # No crear si no existe
+                upsert=True  # Crear documento si no existe
             )
-            return result.modified_count > 0 or result.matched_count > 0
+            return result.modified_count > 0 or result.matched_count > 0 or result.upserted_id is not None
         except Exception as e:
             st.error(f"Error al actualizar campos del dispositivo: {str(e)}")
             return False
