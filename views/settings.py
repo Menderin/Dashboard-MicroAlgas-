@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 
 from modules.database import DatabaseConnection
 from modules.config_manager import ConfigManager
+from modules.sensor_registry import SensorRegistry
 
 # --- ICONOS SVG ---
 ICON_SAVE = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>'
@@ -149,69 +150,60 @@ def show_view():
                 else:
                     target_param = st.selectbox("Parámetro", valid_params, format_func=lambda x: str(x).replace('_', ' ').title())
                     
-                    # Cargar Conf
-                    base_conf = config_manager.get_all_configured_sensors().get(target_param, {})
+                    # --- Cargar umbrales del dispositivo ---
+                    # 1. Defaults globales desde SensorRegistry (fuente confiable)
+                    registry_meta = SensorRegistry.get_default_metadata(target_param)
+                    base_conf = {
+                        "min_value": registry_meta.optimal_min,
+                        "max_value": registry_meta.optimal_max,
+                    }
+                    # Sobreescribir con config global de la BD si existe
+                    global_conf = config_manager.get_all_configured_sensors().get(target_param, {})
+                    if global_conf:
+                        base_conf["min_value"] = float(global_conf.get("optimal_min", global_conf.get("min", base_conf["min_value"])))
+                        base_conf["max_value"] = float(global_conf.get("optimal_max", global_conf.get("max", base_conf["max_value"])))
+
+                    # 2. Umbrales específicos del dispositivo (tienen prioridad sobre los globales)
                     dev_specifics_raw = config_manager.get_device_thresholds(target_dev)
-                    
-                    # COMPATIBILIDAD: Convertir formato plano (ph_min, temp_max, etc.) a formato estructurado
+
+                    # Mapeo de prefijos almacenados → nombre canónico del sensor
+                    PREFIX_MAP = {
+                        'temp': 'temperature', 'temperatura': 'temperature', 'temperature': 'temperature',
+                        'ph': 'ph', 'do': 'do', 'oxygen': 'oxygen', 'saturation': 'saturation',
+                        'ammonia': 'ammonia', 'nitrite': 'nitrite', 'nitrate': 'nitrate',
+                        'alkalinity': 'alkalinity', 'phosphate': 'phosphate', 'hardness': 'hardness',
+                        'tss': 'tss', 'biofloc_index': 'biofloc_index', 'ec': 'ec',
+                        'orp': 'orp', 'turbidez': 'turbidez',
+                    }
+
                     dev_specifics = {}
                     if dev_specifics_raw:
-                        # Verificar si tiene formato nuevo (agrupado por parámetro)
                         has_new_format = any(isinstance(v, dict) and 'min_value' in v for v in dev_specifics_raw.values())
-                        
                         if not has_new_format:
-                            # Convertir formato plano a estructurado
-                            # Mapear {ph_min: 6, ph_max: 8.2, temperature_min: 26, temp_max: 29}
-                            # a {ph: {min_value: 6, max_value: 8.2}, temperature: {min_value: 26, max_value: 29}}
-                            # Mapeo de prefijos almacenados → nombre canónico del sensor (como aparece en los datos)
-                            prefix_to_canonical = {
-                                'temp': 'temperature',
-                                'temperatura': 'temperature',
-                                'temperature': 'temperature',
-                                'ph': 'ph',
-                                'do': 'do',
-                                'oxygen': 'oxygen',
-                                'saturation': 'saturation',
-                                'ammonia': 'ammonia',
-                                'nitrite': 'nitrite',
-                                'nitrate': 'nitrate',
-                                'alkalinity': 'alkalinity',
-                                'phosphate': 'phosphate',
-                                'hardness': 'hardness',
-                                'tss': 'tss',
-                                'biofloc_index': 'biofloc_index',
-                                'ec': 'ec',
-                                'orp': 'orp',
-                                'turbidez': 'turbidez',
-                            }
-                            
+                            # Convertir formato plano {temperature_min: X, temperature_max: Y}
+                            # a formato estructurado {temperature: {min_value: X, max_value: Y}}
                             for key, value in dev_specifics_raw.items():
                                 if isinstance(value, (dict, list)):
                                     continue
-                                # Parsear keys como "ph_min", "temperature_max", etc.
-                                parts = key.lower().rsplit('_', 1)  # Dividir desde la derecha
+                                parts = key.lower().rsplit('_', 1)
                                 if len(parts) == 2:
-                                    param_name = parts[0]
-                                    threshold_type = parts[1]
-                                    
-                                    # Normalizar al nombre canónico del sensor
-                                    normalized_param = prefix_to_canonical.get(param_name, param_name)
-                                    
-                                    if normalized_param not in dev_specifics:
-                                        dev_specifics[normalized_param] = {}
-                                    
+                                    param_name, threshold_type = parts
+                                    canonical = PREFIX_MAP.get(param_name, param_name)
+                                    if canonical not in dev_specifics:
+                                        dev_specifics[canonical] = {}
                                     if threshold_type == 'min':
-                                        dev_specifics[normalized_param]['min_value'] = float(value)
+                                        dev_specifics[canonical]['min_value'] = float(value)
                                     elif threshold_type == 'max':
-                                        dev_specifics[normalized_param]['max_value'] = float(value)
+                                        dev_specifics[canonical]['max_value'] = float(value)
                         else:
                             dev_specifics = dev_specifics_raw
-                    
+
+                    # 3. Resolver la conf final: device > global > registry
                     current_conf = dev_specifics.get(target_param, base_conf)
-                    
-                    # Get Values - Solo min y max (con fallback a optimal_min/optimal_max de defaults globales)
-                    d_omin = float(current_conf.get("min_value", current_conf.get("optimal_min", current_conf.get("min", 4.0))))
-                    d_omax = float(current_conf.get("max_value", current_conf.get("optimal_max", current_conf.get("max", 8.0))))
+
+                    # Valores finales (con fallback al registry)
+                    d_omin = float(current_conf.get("min_value", base_conf["min_value"]))
+                    d_omax = float(current_conf.get("max_value", base_conf["max_value"]))
                     
                     # Calcular zonas automáticas (20% del rango)
                     range_size = d_omax - d_omin
